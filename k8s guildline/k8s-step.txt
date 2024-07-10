@@ -1,0 +1,255 @@
+# install k8s plugin
+curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+chmod +x ./kubectl
+sudo mv ./kubectl /usr/local/bin/kubectl
+kubectl version --client
+
+# install Helm plugin
+curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+chmod 777 get_helm.sh
+./get_helm.sh
+
+# install EBS CSI drive
+helm repo add aws-ebs-csi-driver https://kubernetes-sigs.github.io/aws-ebs-csi-driver/
+helm repo update
+helm install aws-ebs-csi-driver aws-ebs-csi-driver/aws-ebs-csi-driver --namespace kube-system
+
+kubectl apply -k "github.com/kubernetes-sigs/aws-ebs-csi-driver/deploy/kubernetes/overlays/stable/ecr/?ref=release-1.3"
+kubectl get pods -n kube-system | grep ebs-csi    #(check EBS plugin) 
+
+
+# create cluster & node_group on AWS console, connect eks
+aws eks --region <region-code> update-kubeconfig --name <cluster-name>
+aws eks --region us-east-1 update-kubeconfig --name try
+
+kubectl config get-contexts
+kubectl get nodes
+
+--------------------------------------------
+# check有冇裝到ebs驅動 (blank=冇裝)
+kubectl get pods -n kube-system | grep ebs-csi  
+
+# PVC volume
+kubectl get pvc
+kubectl describe pvc mariadb-pvc
+kubectl delete pvc mariadb-pvc
+
+# POD
+kubectl get pod
+kubectl logs mariadb-6688d7fc4-6qf2s
+kubectl describe pod mariadb-6688d7fc4-6qf2s
+kubectl delete pod mariadb-66cdc5b947-bpmc9 --force
+
+kubectl exec -it mariadb-66cdc5b947-7g6gg  --  /bin/sh
+--------------------------------------------
+
+# DPM
+kubectl scale deployment mariadb --replicas=0
+kubectl scale deployment moodle --replicas=0
+
+kubectl logs 
+kubectl delete deployment mariadb
+----------------------------------------------
+
+# connect to mariadb_db
+kubectl exec -it mariadb-66cdc5b947-7g6gg -- bin/sh
+kubectl exec -it mariadb-66cdc5b947-7g6gg -- mysql -h mariadb -u bn_moodle -pbitnami bitnami_moodle
+
+mysql -h mariadb -u bn_moodle -pbitnami bitnami_moodle
+<-host, -user, -pw, db_name>
+
+
+# export mariadb sql data
+mysqldump -h localhost -u bn_moodle -pbitnami bitnami_moodle > /tmp/bitnami.sql
+
+# download / upload data to local / pod
+kubectl cp <pod-name>:<path/data.sql> <path/data.sql>
+
+kubectl cp mariadb-66cdc5b947-7g6gg:tmp/bitnami.sql ./bitnami.sql
+kubectl cp ./bitnami.sql mariadb-66cdc5b947-7g6gg:/tmp/bitnami.sql
+
+
+# edit format
+nano ./bitnami.sql
+ctrl+\ ctrl+_ 
+
+ROW_FORMAT=COMPRESSED
+ROW_FORMAT=DYNAMIC
+
+# migrate data to aurora
+kubectl exec -it mariadb-66cdc5b947-7g6gg -- \
+mysql -u root -p12345678 -h database-1.cluster-cp9hsrnhtomo.us-east-1.rds.amazonaws.com bitnami_moodle < /tmp/bitnami.sql
+
+-------------------------------------------
+
+# pod get in aurora
+kubectl exec -it moodle-55f5d686-6hxhx -- mysql -u root -p12345678 -h \
+database-1.cluster-cp9hsrnhtomo.us-east-1.rds.amazonaws.com
+
+# connect aurora
+mysql -u root -p12345678 -h database-1.cluster-cp9hsrnhtomo.us-east-1.rds.amazonaws.com
+
+SHOW DATABASES;
+USE bitnami_moodle;
+select * from mdl_course;
+SHOW TABLES;
+CREATE DATABASE bitnami_moodle;
+DROP DATABASE try;
+
+--------------------------------------------------------------
+
+# moodle config.php (local edit)
+
+kubectl exec -it moodle-678dd796d9-nvghd -- cat bitnami/moodle/config.php
+
+kubectl cp moodle-678dd796d9-nvghd:/bitnami/moodle/config.php ./config.php
+kubectl cp ./config.php moodle-678dd796d9-nvghd:/bitnami/moodle/config.php
+
+--------------------------------------------------------------
+
+# debug
+
+kublectl delete pvc
+kubectl delete deployment moodle
+kubectl delete pod moodle-b8c4d8f77-vhm25 --force
+
+kubectl scale deployment moodle --replicas=0
+
+kubectl logs moodle-64cbc78586-5psmr
+kubectl describe pod moodle-55f5d686-wg4pc 
+
+
+-----------------------------------------------
+
+# EKS private
+place NAT in public each
+modifly private RT (0.0.0.0/0 tg=NAT)
+
+
+# Multi VPC
+peer want(requester)  receive(accepter/sourse)
+All VPC RT interactive  (10.0.0.0/16 tg=peer) & (172.31.0.0/16 tg=peer)
+
+
+# volume / deployment
+yaml change & rebuild pod = no change, still ref PVC
+PVC change(pod exec -it) & rebuild = change
+
+
+# DB public / VPC
+no public , need pod/bastion/docker to connect
+multi VPC = peer + RT + sg
+
+------------------------------------------------------------
+
+# EBS drive again
+kubectl apply -k "github.com/kubernetes-sigs/aws-ebs-csi-driver/deploy/kubernetes/overlays/stable/ecr/?ref=release-1.4"
+kubectl get pods -n kube-system
+
+# Scale
+kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+kubectl get deployment metrics-server -n kube-system
+
+# Set metrice
+kubectl autoscale deployment moodle --cpu-percent=10 --min=1 --max=3
+kubectl edit hpa moodle
+kubectl scale deployment moodle --replicas=1
+
+# monitor
+kubectl get hpa
+kubectl get hpa moodle -w
+
+# script workload
+kubectl run -i \
+    --tty load-generator2 \
+    --rm --image=busybox \
+    --restart=Never \
+    -- /bin/sh -c "while sleep 0.01; do wget -q -O- http://ad5a982a0f43d4a5bb29a391d10f1b01-551867114.us-east-1.elb.amazonaws.com; done"
+
+        resources:
+          requests:
+            cpu: 50m 	  #100m
+            memory: 128Mi #512Mi
+          limits:
+            cpu: 100m 	  #500m
+            memory: 256Mi #1Gi
+
+#-------------------------------------------------------------------------------------
+
+kubectl exec -it moodle-55f5d686-b8zc8 -- mysql -u root -p12345678 -h \
+database-1.cluster-cp9hsrnhtomo.us-east-1.rds.amazonaws.com
+
+CREATE DATABASE mydb;
+CREATE TABLE messages (id INT AUTO_INCREMENT PRIMARY KEY, message TEXT);
+
+kubectl create configmap flask-config --from-literal=MYSQL_USER=root --from-literal=MYSQL_DB=mydb
+kubectl delete configmap flask-config
+kubectl get configmap
+kubectl describe configmap flask-config
+
+
+kubectl scale deployment two-tier-app --replicas=0
+
+curl http://a3b7603adb20b4afa9bf4b284d215d31-194159204.us-east-1.elb.amazonaws.com
+
+-------------------------------------------------------------------------------------
+
+# istio install
+curl -L https://istio.io/downloadIstio | sh -
+cd istio-*
+export PATH=$PWD/bin:$PATH
+istioctl install --set profile=demo -y
+
+# enable
+kubectl label namespace default istio-injection=enabled
+
+# cd home ; apply istio & flask v2 yaml
+
+# observability tools
+kubectl apply -f https://raw.githubusercontent.com/istio/istio/release-1.13/samples/addons/kiali.yaml
+kubectl apply -f https://raw.githubusercontent.com/istio/istio/release-1.13/samples/addons/prometheus.yaml
+kubectl apply -f https://raw.githubusercontent.com/istio/istio/release-1.13/samples/addons/grafana.yaml
+kubectl apply -f https://raw.githubusercontent.com/istio/istio/release-1.13/samples/addons/jaeger.yaml
+
+kubectl port-forward svc/kiali 20001:20001 -n istio-system
+kubectl port-forward svc/grafana 3000:3000 -n istio-system
+kubectl port-forward svc/tracing 16686:80 -n istio-system
+
+# check status & dashboard
+kubectl get pods -n istio-system
+kubectl get svc istio-ingressgateway -n istio-system
+3.90.67.206
+a6e8ae064b6834df2833755ba06cb27f-1489040610.us-east-1.elb.amazonaws.com
+
+# traffic shifting
+kubectl get pod
+kubectl logs -f two-tier-app-v1-6b9c7fc6d5-gkfg4 -c two-tier-app
+kubectl logs -f two-tier-app-v2-8677b7ff66-whhm4 -c two-tier-app
+
+-----------------------------------------------------------------------------------------------
+# Demo
+
+kubectl get hpa
+kubectl edit hpa moodle
+
+kubectl get services
+kubectl get svc istio-ingressgateway -n istio-system
+ad5a982a0f43d4a5bb29a391d10f1b01-583259579.us-east-1.elb.amazonaws.com
+
+# 1cmd
+v1flask-cfm-istio.yaml
+v2flask-cfm-istio.yaml
+aurora-moodle-deployment-scale.yaml
+
+kubectl get deployment
+kubectl delete deployment two-tier-app-v2
+kubectl scale deployment moodle --replicas=1
+
+kubectl exec -it moodle-55f5d686-b8zc8 -- mysql -u root -p12345678 -h \
+database-1.cluster-cp9hsrnhtomo.us-east-1.rds.amazonaws.com
+
+USE bitnami_moodle; mydb;
+select * from mdl_course;
+select * from message;
+
+

@@ -1,0 +1,47 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: two-tier-app-v1  # Changed name to indicate v1
+  labels:
+    app: two-tier-app
+    version: v1  # Added version label
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: two-tier-app
+      version: v1  # Added version label
+  template:
+    metadata:
+      labels:
+        app: two-tier-app
+        version: v1  # Added version label
+    spec:
+      containers:
+        - name: two-tier-app
+          image: trainwithshubham/flaskapp:latest
+          envFrom:
+            - configMapRef:
+                name: flask-config
+          env:
+            - name: MYSQL_HOST
+              value: "database-1.cluster-cp9hsrnhtomo.us-east-1.rds.amazonaws.com"
+            - name: MYSQL_PASSWORD
+              value: "12345678"
+          ports:
+            - containerPort: 5000
+          imagePullPolicy: Always
+  
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: two-tier-app-service
+spec:
+  selector:
+    app: two-tier-app
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 5000
+  type: ClusterIP
